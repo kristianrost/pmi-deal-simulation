@@ -95,63 +95,75 @@ function norm(value: number, min: number, max: number) {
   return clamp(0, ((value - min) / (max - min)) * 100, 100);
 }
 
-// ----------- PMI Robustness Scoring (zone-based) -----------
+// ---------- PMI Robustness Index (penalty + caps) ----------
 
 function scoreShare(share: number) {
-  if (share >= 120) return 100;
-  if (share >= 110) return 85;
-  if (share >= 100) return 70;
-  if (share >= 90) return 50;
+  // slightly stricter at the top end
+  if (share >= 128) return 100;
+  if (share >= 120) return 90;
+  if (share >= 110) return 75;
+  if (share >= 100) return 60;
+  if (share >= 90) return 45;
   return 30;
 }
 
 function scoreSynergy(syn: number) {
-  if (syn >= 30) return 100;
-  if (syn >= 25) return 85;
-  if (syn >= 20) return 70;
-  if (syn >= 15) return 50;
+  // make 100 rare: requires really strong synergy delivery
+  if (syn >= 35) return 100;
+  if (syn >= 30) return 90;
+  if (syn >= 25) return 75;
+  if (syn >= 20) return 60;
+  if (syn >= 15) return 45;
   return 30;
 }
 
 function scoreAttrition(attr: number) {
-  if (attr <= 3) return 100;
-  if (attr <= 5) return 85;
-  if (attr <= 7) return 70;
-  if (attr <= 9) return 50;
+  // very low attrition should be rewarded, but 100 is rare
+  if (attr <= 2.5) return 100;
+  if (attr <= 3.5) return 90;
+  if (attr <= 5.0) return 75;
+  if (attr <= 7.0) return 60;
+  if (attr <= 9.0) return 45;
   return 30;
-}
-
-function scoreRisk(risk: number) {
-  if (risk >= 40 && risk <= 60) return 100;
-  if (risk >= 30 && risk <= 70) return 80;
-  if (risk < 30 || risk > 75) return 50;
-  return 30;
-}
-
-function scoreCapacity(cap: number) {
-  if (cap >= 45 && cap <= 65) return 100;
-  if (cap >= 35) return 80;
-  if (cap >= 25) return 60;
-  return 30;
-}
-
-function scoreCred(cred: number) {
-  if (cred >= 70) return 100;
-  if (cred >= 60) return 85;
-  if (cred >= 50) return 70;
-  return 50;
 }
 
 function computeRobustnessIndex(s: State) {
-  const score =
-    scoreShare(s.share) * 0.30 +
-    scoreSynergy(s.synergy) * 0.25 +
-    scoreAttrition(s.attrition) * 0.15 +
-    scoreRisk(s.risk) * 0.10 +
-    scoreCapacity(s.capacity) * 0.10 +
-    scoreCred(s.cred) * 0.10;
+  // 1) Base score: only the 3 "outcome KPIs"
+  const base =
+    scoreShare(s.share) * 0.45 +
+    scoreSynergy(s.synergy) * 0.35 +
+    scoreAttrition(s.attrition) * 0.20;
 
-  return Math.round(score);
+  // 2) Penalties: execution reality checks
+  // Credibility: below 70 starts hurting noticeably
+  const credPenalty = Math.max(0, 70 - s.cred) * 0.35; // max ~24.5 at cred=0
+
+  // Risk: above 60 hurts; above 80 hurts more
+  const riskPenalty =
+    Math.max(0, s.risk - 60) * 0.55 +      // mild
+    Math.max(0, s.risk - 80) * 0.65;       // extra steep in the danger zone
+
+  // Capacity: below 55 hurts; below 40 hurts more
+  const capPenalty =
+    Math.max(0, 55 - s.capacity) * 0.45 +
+    Math.max(0, 40 - s.capacity) * 0.70;
+
+  // combo overload (this is the "you are breaking the org" penalty)
+  const overloadPenalty =
+    (s.risk >= 85 && s.capacity <= 35) ? 10 :
+    (s.risk >= 80 && s.capacity <= 40) ? 6 :
+    0;
+
+  let score = base - credPenalty - riskPenalty - capPenalty - overloadPenalty;
+
+  // 3) Hard caps (prevents ridiculous 90+ under red conditions)
+  // If you're in red zones, you cannot be "robust".
+  if (s.risk >= 85) score = Math.min(score, 75);
+  if (s.capacity <= 30) score = Math.min(score, 78);
+  if (s.risk >= 85 && s.capacity <= 30) score = Math.min(score, 65);
+
+  return Math.round(clamp(0, score, 100));
+}
 }
 function signed(delta: number, digits: 1 | 2 = 1) {
   const v = digits === 1 ? round1(delta) : Math.round(delta * 100) / 100;

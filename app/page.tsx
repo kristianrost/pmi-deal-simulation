@@ -95,29 +95,64 @@ function norm(value: number, min: number, max: number) {
   return clamp(0, ((value - min) / (max - min)) * 100, 100);
 }
 
-function computeRobustnessIndex(s: State) {
-  const shareScore = norm(s.share, 70, 130);
-  const synergyScore = clamp(0, s.synergy, 100);
-  const credScore = clamp(0, s.cred, 100);
-  const riskScore = clamp(0, 100 - s.risk, 100);
-  const capacityScore = clamp(0, s.capacity, 100);
-  const attrScore = 100 - norm(s.attrition, 2, 12);
+// ----------- PMI Robustness Scoring (zone-based) -----------
 
-  let score =
-    0.25 * shareScore +
-    0.25 * synergyScore +
-    0.15 * credScore +
-    0.15 * capacityScore +
-    0.10 * riskScore +
-    0.10 * attrScore;
-
-  // systemic overstretch penalty
-  if (s.risk > 85 && s.capacity < 35) score *= 0.85;
-  if (s.risk > 92 && s.capacity < 30) score *= 0.75;
-
-  return Math.round(clamp(0, score, 100));
+function scoreShare(share: number) {
+  if (share >= 120) return 100;
+  if (share >= 110) return 85;
+  if (share >= 100) return 70;
+  if (share >= 90) return 50;
+  return 30;
 }
 
+function scoreSynergy(syn: number) {
+  if (syn >= 30) return 100;
+  if (syn >= 25) return 85;
+  if (syn >= 20) return 70;
+  if (syn >= 15) return 50;
+  return 30;
+}
+
+function scoreAttrition(attr: number) {
+  if (attr <= 3) return 100;
+  if (attr <= 5) return 85;
+  if (attr <= 7) return 70;
+  if (attr <= 9) return 50;
+  return 30;
+}
+
+function scoreRisk(risk: number) {
+  if (risk >= 40 && risk <= 60) return 100;
+  if (risk >= 30 && risk <= 70) return 80;
+  if (risk < 30 || risk > 75) return 50;
+  return 30;
+}
+
+function scoreCapacity(cap: number) {
+  if (cap >= 45 && cap <= 65) return 100;
+  if (cap >= 35) return 80;
+  if (cap >= 25) return 60;
+  return 30;
+}
+
+function scoreCred(cred: number) {
+  if (cred >= 70) return 100;
+  if (cred >= 60) return 85;
+  if (cred >= 50) return 70;
+  return 50;
+}
+
+function computeRobustnessIndex(s: State) {
+  const score =
+    scoreShare(s.share) * 0.30 +
+    scoreSynergy(s.synergy) * 0.25 +
+    scoreAttrition(s.attrition) * 0.15 +
+    scoreRisk(s.risk) * 0.10 +
+    scoreCapacity(s.capacity) * 0.10 +
+    scoreCred(s.cred) * 0.10;
+
+  return Math.round(score);
+}
 function signed(delta: number, digits: 1 | 2 = 1) {
   const v = digits === 1 ? round1(delta) : Math.round(delta * 100) / 100;
   const s = v > 0 ? "+" : v < 0 ? "−" : "±";

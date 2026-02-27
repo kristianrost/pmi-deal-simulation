@@ -164,7 +164,7 @@ function computeRobustnessIndex(s: State) {
 
   return Math.round(clamp(0, score, 100));
 }
-}
+
 function signed(delta: number, digits: 1 | 2 = 1) {
   const v = digits === 1 ? round1(delta) : Math.round(delta * 100) / 100;
   const s = v > 0 ? "+" : v < 0 ? "−" : "±";

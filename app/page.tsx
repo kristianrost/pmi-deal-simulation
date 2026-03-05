@@ -19,13 +19,13 @@ type Flags = {
 
 type State = {
   share: number; // index (70..130)
-  synergy: number; // % of 750m target (0..100, but capped by synergyCeiling)
+  synergy: number; // cumulative % of €750m target (0..100-ish)
   attrition: number; // % (2..12)
   cred: number; // 0..100
   risk: number; // 0..100
   capacity: number; // 0..100
 
-  synergyCeiling: number; // 60..100
+  synergyCeiling: number; // 60..100 (cap for future, not retroactive)
   flags: Flags;
 };
 
@@ -55,7 +55,7 @@ type OptionDef = {
   title: string;
   blurb: string;
 
-  // base synergy in percentage points (pp) of 750m
+  // base synergy effect in percentage points (pp) of €750m (can be negative for resets)
   baseSynergy: number;
 
   // deltas
@@ -65,7 +65,7 @@ type OptionDef = {
   dCapacity: number;
 
   // DG4 extras (optional)
-  dg4Ceiling?: number; // set synergyCeiling to this
+  dg4Ceiling?: number; // set synergyCeiling to this (future cap)
   dg4GuidanceShock?: number; // immediate share impact (negative for resets)
   setFlags?: Partial<Flags>;
 };
@@ -90,11 +90,6 @@ function fmt1(v: number) {
   return round1(v).toFixed(1);
 }
 
-function norm(value: number, min: number, max: number) {
-  if (max === min) return 0;
-  return clamp(0, ((value - min) / (max - min)) * 100, 100);
-}
-
 function boardConvictionLabel(v: number) {
   switch (v) {
     case 1:
@@ -114,73 +109,6 @@ function boardConvictionLabel(v: number) {
   }
 }
 
-// ---------- PMI Robustness Index (penalty + caps) ----------
-function scoreShare(share: number) {
-  // slightly stricter at the top end
-  if (share >= 128) return 100;
-  if (share >= 120) return 90;
-  if (share >= 110) return 75;
-  if (share >= 100) return 60;
-  if (share >= 90) return 45;
-  return 30;
-}
-
-function scoreSynergy(syn: number) {
-  // make 100 rare: requires really strong synergy delivery
-  if (syn >= 35) return 100;
-  if (syn >= 30) return 90;
-  if (syn >= 25) return 75;
-  if (syn >= 20) return 60;
-  if (syn >= 15) return 45;
-  return 30;
-}
-
-function scoreAttrition(attr: number) {
-  // very low attrition should be rewarded, but 100 is rare
-  if (attr <= 2.5) return 100;
-  if (attr <= 3.5) return 90;
-  if (attr <= 5.0) return 75;
-  if (attr <= 7.0) return 60;
-  if (attr <= 9.0) return 45;
-  return 30;
-}
-
-function computeRobustnessIndex(s: State) {
-  // 1) Base score: only the 3 "outcome KPIs"
-  const base =
-    scoreShare(s.share) * 0.45 +
-    scoreSynergy(s.synergy) * 0.35 +
-    scoreAttrition(s.attrition) * 0.20;
-
-  // 2) Penalties: execution reality checks
-  // Credibility: below 70 starts hurting noticeably
-  const credPenalty = Math.max(0, 70 - s.cred) * 0.35; // max ~24.5 at cred=0
-
-  // Risk: above 60 hurts; above 80 hurts more
-  const riskPenalty =
-    Math.max(0, s.risk - 60) * 0.55 + // mild
-    Math.max(0, s.risk - 80) * 0.65; // extra steep in the danger zone
-
-  // Capacity: below 55 hurts; below 40 hurts more
-  const capPenalty =
-    Math.max(0, 55 - s.capacity) * 0.45 +
-    Math.max(0, 40 - s.capacity) * 0.70;
-
-  // combo overload (this is the "you are breaking the org" penalty)
-  const overloadPenalty =
-    s.risk >= 85 && s.capacity <= 35 ? 10 : s.risk >= 80 && s.capacity <= 40 ? 6 : 0;
-
-  let score = base - credPenalty - riskPenalty - capPenalty - overloadPenalty;
-
-  // 3) Hard caps (prevents ridiculous 90+ under red conditions)
-  // If you're in red zones, you cannot be "robust".
-  if (s.risk >= 85) score = Math.min(score, 75);
-  if (s.capacity <= 30) score = Math.min(score, 78);
-  if (s.risk >= 85 && s.capacity <= 30) score = Math.min(score, 65);
-
-  return Math.round(clamp(0, score, 100));
-}
-
 function signed(delta: number, digits: 1 | 2 = 1) {
   const v = digits === 1 ? round1(delta) : Math.round(delta * 100) / 100;
   const s = v > 0 ? "+" : v < 0 ? "−" : "±";
@@ -194,6 +122,59 @@ function badgeClass(delta: number) {
 }
 function deepCopyState(s: State): State {
   return JSON.parse(JSON.stringify(s)) as State;
+}
+
+// ---------- PMI Robustness Index (penalty + caps) ----------
+function scoreShare(share: number) {
+  if (share >= 128) return 100;
+  if (share >= 120) return 90;
+  if (share >= 110) return 75;
+  if (share >= 100) return 60;
+  if (share >= 90) return 45;
+  return 30;
+}
+function scoreSynergy(syn: number) {
+  if (syn >= 35) return 100;
+  if (syn >= 30) return 90;
+  if (syn >= 25) return 75;
+  if (syn >= 20) return 60;
+  if (syn >= 15) return 45;
+  return 30;
+}
+function scoreAttrition(attr: number) {
+  if (attr <= 2.5) return 100;
+  if (attr <= 3.5) return 90;
+  if (attr <= 5.0) return 75;
+  if (attr <= 7.0) return 60;
+  if (attr <= 9.0) return 45;
+  return 30;
+}
+function computeRobustnessIndex(s: State) {
+  const base =
+    scoreShare(s.share) * 0.45 +
+    scoreSynergy(s.synergy) * 0.35 +
+    scoreAttrition(s.attrition) * 0.20;
+
+  const credPenalty = Math.max(0, 70 - s.cred) * 0.35;
+
+  const riskPenalty =
+    Math.max(0, s.risk - 60) * 0.55 +
+    Math.max(0, s.risk - 80) * 0.65;
+
+  const capPenalty =
+    Math.max(0, 55 - s.capacity) * 0.45 +
+    Math.max(0, 40 - s.capacity) * 0.70;
+
+  const overloadPenalty =
+    s.risk >= 85 && s.capacity <= 35 ? 10 : s.risk >= 80 && s.capacity <= 40 ? 6 : 0;
+
+  let score = base - credPenalty - riskPenalty - capPenalty - overloadPenalty;
+
+  if (s.risk >= 85) score = Math.min(score, 75);
+  if (s.capacity <= 30) score = Math.min(score, 78);
+  if (s.risk >= 85 && s.capacity <= 30) score = Math.min(score, 65);
+
+  return Math.round(clamp(0, score, 100));
 }
 
 // ---------- traffic lights for drivers ----------
@@ -210,7 +191,6 @@ function trafficForDriver(name: "cred" | "risk" | "capacity", v: number): Traffi
     if (v <= 70) return "yellow";
     return "red";
   }
-  // capacity
   if (v >= 65) return "green";
   if (v >= 40) return "yellow";
   return "red";
@@ -316,7 +296,6 @@ function TrendLine({
     }
   };
 
-  // simple grid lines (4)
   const gridVals = [minV, minV + (maxV - minV) / 3, minV + (2 * (maxV - minV)) / 3, maxV].map(
     (v) => Math.round(v * 10) / 10
   );
@@ -373,8 +352,6 @@ function TrendLine({
 
 // ---------- conviction model (ONLY affects Share/Synergy/Attrition) ----------
 function gradeToScore(grade: number) {
-  // 1 = best, 6 = worst
-  // Score in [-1..+1], neutral at 3.5
   const s = (3.5 - grade) / 2.5;
   return clamp(-1, s, 1);
 }
@@ -383,12 +360,16 @@ function applyPresentationGrade(nextIn: State, grade: number, feasibility: numbe
   const s = deepCopyState(nextIn);
   const score = gradeToScore(grade);
 
-  const dShare = 2.2 * score; // max +/- 2.2
-  const dSynergy = 1.2 * score * feasibility; // small alignment effect
-  const dAttr = -0.25 * score; // good presentation slightly reduces attrition
+  const dShare = 2.2 * score;
+  const dSynergy = 1.2 * score * feasibility;
+  const dAttr = -0.25 * score;
 
   s.share = clamp(70, s.share + dShare, 130);
-  s.synergy = clamp(0, s.synergy + dSynergy, s.synergyCeiling);
+
+  // ceiling should never retroactively cut; cap with max(current synergy, ceiling)
+  const effCeil = Math.max(s.synergyCeiling, s.synergy);
+  s.synergy = clamp(0, s.synergy + dSynergy, effCeil);
+
   s.attrition = clamp(2, s.attrition + dAttr, 12);
 
   return { next: s, deltas: { dShare, dSynergy, dAttr } };
@@ -599,7 +580,8 @@ const gates: GateDef[] = [
         title: "Credibility Reset",
         blurb:
           "Adjust external commitment to a more realistic outlook (~€600–650m). Prioritize operational/cost synergies and stabilize the IT timeline to protect delivery credibility.",
-        baseSynergy: 8,
+        // changed: short-term realization drops
+        baseSynergy: -2,
         dAttrition: -0.6,
         dRisk: -10,
         dCred: -5,
@@ -613,13 +595,14 @@ const gates: GateDef[] = [
         title: "Strategic Prioritization",
         blurb:
           "Maintain high ambition (~€680–700m) but reallocate focus to high-value strategic synergies while phasing execution in waves.",
-        baseSynergy: 12,
+        // changed: short-term realization drops slightly; market applies uncertainty discount
+        baseSynergy: -1.5,
         dAttrition: +0.4,
         dRisk: +4,
         dCred: +3,
         dCapacity: -5,
         dg4Ceiling: 95,
-        dg4GuidanceShock: -1.0,
+        dg4GuidanceShock: -1.5,
         setFlags: { dg4_strategicPrioritization: true },
       },
       {
@@ -627,7 +610,8 @@ const gates: GateDef[] = [
         title: "Stability First",
         blurb:
           "Shift focus from synergy maximization to business continuity and integration stabilization: pause non-critical revenue initiatives, extend IT timelines, reduce restructuring intensity.",
-        baseSynergy: 6,
+        // changed: pause reduces realization in the period
+        baseSynergy: -4,
         dAttrition: -1.0,
         dRisk: -12,
         dCred: -8,
@@ -705,7 +689,7 @@ function marketNote(gateId: GateId, o: OptionDef, next: State) {
     if (o.id === "B")
       return "Market reacts negatively to a reset, but delivery probability improves. Credibility depends on proving control in the next quarter.";
     if (o.id === "C")
-      return "Market sees a pragmatic pivot: ambition remains, sequencing improves. Success depends on coordination and wave execution.";
+      return "Market sees a pragmatic pivot, but applies a short-term uncertainty discount. Sequencing improves — delivery becomes the gating factor.";
     if (o.id === "D")
       return "Market reads a defensive move. Stability improves, but the value narrative weakens and momentum becomes harder to regain.";
   }
@@ -727,11 +711,7 @@ function marketNote(gateId: GateId, o: OptionDef, next: State) {
   return (parts.join(" ") + (parts.join(" ").endsWith(".") ? "" : ".")).replace("..", ".");
 }
 
-function applyDecision(
-  prev: State,
-  gate: GateDef,
-  option: OptionDef
-): { next: State; feasibility: number; note: string } {
+function applyDecision(prev: State, gate: GateDef, option: OptionDef) {
   const s = deepCopyState(prev);
 
   // 1) Immediate updates
@@ -743,25 +723,30 @@ function applyDecision(
   // 2) Flags
   if (option.setFlags) s.flags = { ...s.flags, ...option.setFlags };
 
-  // 3) DG4 ceiling
+  // 3) DG4 ceiling (future cap only; do NOT retroactively cut already realized synergy)
   if (gate.id === "DG4" && typeof option.dg4Ceiling === "number") {
     s.synergyCeiling = clamp(60, option.dg4Ceiling, 100);
   }
 
-  // 4) Synergy update
+  // 4) Synergy update (cumulative)
   const feasibility = computeFeasibility(s.attrition, s.capacity);
   const synergyNext = s.synergy + option.baseSynergy * feasibility;
-  s.synergy = clamp(0, synergyNext, s.synergyCeiling);
+
+  // --- FIX: ceiling should not retroactively reduce already realized synergy ---
+  // If ceiling is lowered below current realized synergy, keep current synergy and only cap future upside.
+  const effectiveCeiling = Math.max(s.synergyCeiling, s.synergy);
+
+  s.synergy = clamp(0, synergyNext, effectiveCeiling);
 
   // 4b) Synergy leakage under systemic stress
   const overloadSignals =
     (s.risk > 85 ? 1 : 0) + (s.capacity < 30 ? 1 : 0) + (s.attrition > 9 ? 1 : 0);
-  if (overloadSignals === 2) s.synergy = clamp(0, s.synergy * 0.94, s.synergyCeiling);
-  if (overloadSignals === 3) s.synergy = clamp(0, s.synergy * 0.9, s.synergyCeiling);
+  if (overloadSignals === 2) s.synergy = clamp(0, s.synergy * 0.94, effectiveCeiling);
+  if (overloadSignals === 3) s.synergy = clamp(0, s.synergy * 0.9, effectiveCeiling);
 
   // 5) Share update (base)
   const shareDelta =
-    0.35 * option.baseSynergy + 0.1 * option.dCred - 0.12 * option.dRisk - 0.18 * option.dAttrition;
+    0.35 * option.baseSynergy + 0.10 * option.dCred - 0.12 * option.dRisk - 0.18 * option.dAttrition;
   s.share = clamp(70, s.share + shareDelta, 130);
 
   // 6) DG4 guidance shock
@@ -808,40 +793,33 @@ function applyDecision(
   // ---- SYSTEMIC STRESS ENGINE (Non-linear) ----
   let stressPenalty = 0;
 
-  // escalating risk zones
   if (s.risk > 75) stressPenalty += (s.risk - 75) * 0.15;
   if (s.risk > 85) stressPenalty += (s.risk - 85) * 0.35;
   if (s.risk > 92) stressPenalty += (s.risk - 92) * 0.75;
 
-  // capacity amplification
-  if (s.capacity < 40) stressPenalty += (40 - s.capacity) * 0.2;
-  if (s.capacity < 30) stressPenalty += (30 - s.capacity) * 0.4;
+  if (s.capacity < 40) stressPenalty += (40 - s.capacity) * 0.20;
+  if (s.capacity < 30) stressPenalty += (30 - s.capacity) * 0.40;
 
-  // combined systemic overload multiplier
   if (s.risk > 85 && s.capacity < 35) {
     stressPenalty *= 1.5;
   }
 
-  // apply share penalty
   if (stressPenalty > 0) {
     s.share = clamp(70, s.share - stressPenalty, 130);
   }
 
-  // ---- Immediate credibility hit when system is overstretched ----
   if (s.risk > 85 && s.capacity < 35) {
     const credHit = 4 + Math.round((s.risk - 85) * 0.3) + Math.round((35 - s.capacity) * 0.2);
     s.cred = clamp(0, s.cred - credHit, 100);
   }
 
-  // synergy erosion under collapse
   if (s.risk > 85 && s.capacity < 35) {
-    const erosion = 0.05 + (s.risk - 85) * 0.002; // up to ~10%
-    s.synergy = clamp(0, s.synergy * (1 - erosion), s.synergyCeiling);
+    const erosion = 0.05 + (s.risk - 85) * 0.002;
+    s.synergy = clamp(0, s.synergy * (1 - erosion), Math.max(s.synergyCeiling, s.synergy));
   }
 
   // final clamp
   s.share = clamp(70, s.share, 130);
-  s.synergy = clamp(0, s.synergy, s.synergyCeiling);
   s.attrition = clamp(2, s.attrition, 12);
   s.cred = clamp(0, s.cred, 100);
   s.risk = clamp(0, s.risk, 100);
@@ -922,7 +900,7 @@ export default function Page() {
   const [gateIndex, setGateIndex] = useState<number>(0);
   const [draft, setDraft] = useState<HistoryEntry | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
-  const [grade, setGrade] = useState<number | null>(null); // REQUIRED before proceed
+  const [grade, setGrade] = useState<number | null>(null);
   const didHydrate = useRef(false);
 
   const currentGate = gates[gateIndex];
@@ -942,9 +920,7 @@ export default function Page() {
         setGateIndex(parsed.gateIndex);
         setHistory(parsed.history || []);
       }
-    } catch {
-      // ignore
-    }
+    } catch {}
   }, []);
 
   // persist
@@ -952,9 +928,7 @@ export default function Page() {
     if (!didHydrate.current) return;
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({ state, gateIndex, history }));
-    } catch {
-      // ignore
-    }
+    } catch {}
   }, [state, gateIndex, history]);
 
   const progress = useMemo(
@@ -969,12 +943,7 @@ export default function Page() {
 
   const lastEntry = history.length ? history[history.length - 1] : null;
 
-  // series (DG0 + decisions)
-  const shareSeries = useMemo(() => {
-    const base = 100;
-    return [base, ...history.map((h) => h.next.share)];
-  }, [history]);
-
+  const shareSeries = useMemo(() => [100, ...history.map((h) => h.next.share)], [history]);
   const synergySeries = useMemo(() => [initialState.synergy, ...history.map((h) => h.next.synergy)], [history]);
   const attrSeries = useMemo(() => [initialState.attrition, ...history.map((h) => h.next.attrition)], [history]);
 
@@ -990,7 +959,7 @@ export default function Page() {
   }
 
   function selectOption(g: GateDef, o: OptionDef) {
-    setGrade(null); // reset grade when selecting a new option
+    setGrade(null);
 
     const prev = deepCopyState(state);
     const { next, feasibility, note } = applyDecision(prev, g, o);
@@ -1016,7 +985,6 @@ export default function Page() {
     setDraft(entry);
   }
 
-  // effective draft includes the grade impact (share/synergy/attr only)
   const effectiveDraft = useMemo(() => {
     if (!draft) return null;
     if (grade == null) return draft;
@@ -1164,24 +1132,18 @@ export default function Page() {
                           <div className="text-xs text-slate-300/70">Option {o.id}</div>
                           <div className="mt-1 font-semibold text-white">{o.title}</div>
                         </div>
-                        <div className="text-xs text-slate-200/80 tabular-nums">+{o.baseSynergy}pp</div>
+
+                        {/* FIX: show signed pp (supports negative) */}
+                        <div className="text-xs text-slate-200/80 tabular-nums">{signed(o.baseSynergy, 1)}pp</div>
                       </div>
 
                       <p className="mt-2 text-sm text-slate-200/70">{o.blurb}</p>
 
                       <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-200/75">
-                        <div className="rounded-lg bg-slate-900/40 ring-1 ring-white/10 px-2 py-1">
-                          Cred {signed(o.dCred, 1)}
-                        </div>
-                        <div className="rounded-lg bg-slate-900/40 ring-1 ring-white/10 px-2 py-1">
-                          Risk {signed(o.dRisk, 1)}
-                        </div>
-                        <div className="rounded-lg bg-slate-900/40 ring-1 ring-white/10 px-2 py-1">
-                          Attr {signed(o.dAttrition, 1)}pp
-                        </div>
-                        <div className="rounded-lg bg-slate-900/40 ring-1 ring-white/10 px-2 py-1">
-                          Cap {signed(o.dCapacity, 1)}
-                        </div>
+                        <div className="rounded-lg bg-slate-900/40 ring-1 ring-white/10 px-2 py-1">Cred {signed(o.dCred, 1)}</div>
+                        <div className="rounded-lg bg-slate-900/40 ring-1 ring-white/10 px-2 py-1">Risk {signed(o.dRisk, 1)}</div>
+                        <div className="rounded-lg bg-slate-900/40 ring-1 ring-white/10 px-2 py-1">Attr {signed(o.dAttrition, 1)}pp</div>
+                        <div className="rounded-lg bg-slate-900/40 ring-1 ring-white/10 px-2 py-1">Cap {signed(o.dCapacity, 1)}</div>
                       </div>
 
                       {currentGate.id === "DG4" ? (
@@ -1217,13 +1179,14 @@ export default function Page() {
                 <div className="flex items-center justify-between">
                   <div className="text-xs text-slate-300/70">Impact</div>
                   <div className="text-xs text-slate-200/70 tabular-nums">
-                    Feasibility{" "}
-                    <span className="text-white">{effectiveDraft ? `${fmt1(effectiveDraft.feasibility * 100)}%` : "—"}</span>
+                    Feasibility <span className="text-white">{effectiveDraft ? `${fmt1(effectiveDraft.feasibility * 100)}%` : "—"}</span>
                   </div>
                 </div>
 
                 {!effectiveDraft ? (
-                  <div className="mt-4 text-sm text-slate-200/70">Select an option to see immediate KPI impact and market interpretation.</div>
+                  <div className="mt-4 text-sm text-slate-200/70">
+                    Select an option to see immediate KPI impact and market interpretation.
+                  </div>
                 ) : (
                   <div className="mt-4">
                     <div className="rounded-2xl bg-slate-950/40 ring-1 ring-white/10 p-4">
@@ -1261,9 +1224,7 @@ export default function Page() {
                           <span className="text-slate-200/75">Synergy ceiling</span>
                           <span className="tabular-nums text-white">
                             {fmt1(effectiveDraft.next.synergyCeiling)}%
-                            <span
-                              className={`ml-2 text-xs px-2 py-0.5 rounded-full ${badgeClass(effectiveDraft.deltas.synergyCeiling)}`}
-                            >
+                            <span className={`ml-2 text-xs px-2 py-0.5 rounded-full ${badgeClass(effectiveDraft.deltas.synergyCeiling)}`}>
                               {signed(effectiveDraft.deltas.synergyCeiling, 1)}
                             </span>
                           </span>
@@ -1439,8 +1400,7 @@ export default function Page() {
         </div>
 
         <div className="mt-10 text-xs text-slate-400/70">
-          Local prototype · State persists in localStorage · Adjust parameters in{" "}
-          <span className="text-slate-200">app/page.tsx</span>
+          Local prototype · State persists in localStorage · Adjust parameters in <span className="text-slate-200">app/page.tsx</span>
         </div>
       </div>
     </div>

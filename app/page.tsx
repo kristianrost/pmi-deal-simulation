@@ -34,7 +34,7 @@ type Choice = { gate: GateId; option: OptionId };
 type HistoryEntry = {
   gate: GateId;
   choice: Choice;
-  grade?: number; // 1..6 presentation grade per gate
+  grade?: number; // 1..6 board conviction per gate (internal numeric scale)
   prev: State;
   next: State;
   deltas: {
@@ -95,8 +95,26 @@ function norm(value: number, min: number, max: number) {
   return clamp(0, ((value - min) / (max - min)) * 100, 100);
 }
 
-// ---------- PMI Robustness Index (penalty + caps) ----------
+function boardConvictionLabel(v: number) {
+  switch (v) {
+    case 1:
+      return "Board fully convinced";
+    case 2:
+      return "Board convinced";
+    case 3:
+      return "Board supportive";
+    case 4:
+      return "Board unconvinced";
+    case 5:
+      return "Board concerned";
+    case 6:
+      return "Board rejects";
+    default:
+      return "—";
+  }
+}
 
+// ---------- PMI Robustness Index (penalty + caps) ----------
 function scoreShare(share: number) {
   // slightly stricter at the top end
   if (share >= 128) return 100;
@@ -140,8 +158,8 @@ function computeRobustnessIndex(s: State) {
 
   // Risk: above 60 hurts; above 80 hurts more
   const riskPenalty =
-    Math.max(0, s.risk - 60) * 0.55 +      // mild
-    Math.max(0, s.risk - 80) * 0.65;       // extra steep in the danger zone
+    Math.max(0, s.risk - 60) * 0.55 + // mild
+    Math.max(0, s.risk - 80) * 0.65; // extra steep in the danger zone
 
   // Capacity: below 55 hurts; below 40 hurts more
   const capPenalty =
@@ -150,9 +168,7 @@ function computeRobustnessIndex(s: State) {
 
   // combo overload (this is the "you are breaking the org" penalty)
   const overloadPenalty =
-    (s.risk >= 85 && s.capacity <= 35) ? 10 :
-    (s.risk >= 80 && s.capacity <= 40) ? 6 :
-    0;
+    s.risk >= 85 && s.capacity <= 35 ? 10 : s.risk >= 80 && s.capacity <= 40 ? 6 : 0;
 
   let score = base - credPenalty - riskPenalty - capPenalty - overloadPenalty;
 
@@ -280,7 +296,9 @@ function TrendLine({
     delta: i === 0 ? 0 : v - values[i - 1],
   }));
 
-  const path = pts.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(" ");
+  const path = pts
+    .map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`)
+    .join(" ");
 
   const markerColor = (delta: number, i: number) => {
     if (i === 0) return "#cbd5e1";
@@ -299,8 +317,8 @@ function TrendLine({
   };
 
   // simple grid lines (4)
-  const gridVals = [minV, minV + (maxV - minV) / 3, minV + (2 * (maxV - minV)) / 3, maxV].map((v) =>
-    Math.round(v * 10) / 10
+  const gridVals = [minV, minV + (maxV - minV) / 3, minV + (2 * (maxV - minV)) / 3, maxV].map(
+    (v) => Math.round(v * 10) / 10
   );
 
   return (
@@ -353,9 +371,9 @@ function TrendLine({
   );
 }
 
-// ---------- grade model (ONLY affects Share/Synergy/Attrition) ----------
+// ---------- conviction model (ONLY affects Share/Synergy/Attrition) ----------
 function gradeToScore(grade: number) {
-  // 1 = very good, 6 = bad
+  // 1 = best, 6 = worst
   // Score in [-1..+1], neutral at 3.5
   const s = (3.5 - grade) / 2.5;
   return clamp(-1, s, 1);
@@ -688,7 +706,8 @@ function marketNote(gateId: GateId, o: OptionDef, next: State) {
       return "Market reacts negatively to a reset, but delivery probability improves. Credibility depends on proving control in the next quarter.";
     if (o.id === "C")
       return "Market sees a pragmatic pivot: ambition remains, sequencing improves. Success depends on coordination and wave execution.";
-    if (o.id === "D") return "Market reads a defensive move. Stability improves, but the value narrative weakens and momentum becomes harder to regain.";
+    if (o.id === "D")
+      return "Market reads a defensive move. Stability improves, but the value narrative weakens and momentum becomes harder to regain.";
   }
 
   const parts: string[] = [];
@@ -701,13 +720,18 @@ function marketNote(gateId: GateId, o: OptionDef, next: State) {
   if (o.dAttrition >= 1.2) parts.push("while talent instability raises concern");
   else if (o.dAttrition <= -0.6) parts.push("while improved retention supports delivery");
 
-  if (next.risk >= 85 || next.capacity <= 30) parts.push("— systemic overload signals increase the chance of a sharp correction.");
+  if (next.risk >= 85 || next.capacity <= 30)
+    parts.push("— systemic overload signals increase the chance of a sharp correction.");
 
   if (!parts.length) return "Market reaction is muted; signal strength remains limited.";
   return (parts.join(" ") + (parts.join(" ").endsWith(".") ? "" : ".")).replace("..", ".");
 }
 
-function applyDecision(prev: State, gate: GateDef, option: OptionDef): { next: State; feasibility: number; note: string } {
+function applyDecision(
+  prev: State,
+  gate: GateDef,
+  option: OptionDef
+): { next: State; feasibility: number; note: string } {
   const s = deepCopyState(prev);
 
   // 1) Immediate updates
@@ -730,12 +754,14 @@ function applyDecision(prev: State, gate: GateDef, option: OptionDef): { next: S
   s.synergy = clamp(0, synergyNext, s.synergyCeiling);
 
   // 4b) Synergy leakage under systemic stress
-  const overloadSignals = (s.risk > 85 ? 1 : 0) + (s.capacity < 30 ? 1 : 0) + (s.attrition > 9 ? 1 : 0);
+  const overloadSignals =
+    (s.risk > 85 ? 1 : 0) + (s.capacity < 30 ? 1 : 0) + (s.attrition > 9 ? 1 : 0);
   if (overloadSignals === 2) s.synergy = clamp(0, s.synergy * 0.94, s.synergyCeiling);
-  if (overloadSignals === 3) s.synergy = clamp(0, s.synergy * 0.90, s.synergyCeiling);
+  if (overloadSignals === 3) s.synergy = clamp(0, s.synergy * 0.9, s.synergyCeiling);
 
   // 5) Share update (base)
-  const shareDelta = 0.35 * option.baseSynergy + 0.10 * option.dCred - 0.12 * option.dRisk - 0.18 * option.dAttrition;
+  const shareDelta =
+    0.35 * option.baseSynergy + 0.1 * option.dCred - 0.12 * option.dRisk - 0.18 * option.dAttrition;
   s.share = clamp(70, s.share + shareDelta, 130);
 
   // 6) DG4 guidance shock
@@ -780,39 +806,38 @@ function applyDecision(prev: State, gate: GateDef, option: OptionDef): { next: S
   }
 
   // ---- SYSTEMIC STRESS ENGINE (Non-linear) ----
+  let stressPenalty = 0;
 
-let stressPenalty = 0;
+  // escalating risk zones
+  if (s.risk > 75) stressPenalty += (s.risk - 75) * 0.15;
+  if (s.risk > 85) stressPenalty += (s.risk - 85) * 0.35;
+  if (s.risk > 92) stressPenalty += (s.risk - 92) * 0.75;
 
-// escalating risk zones
-if (s.risk > 75) stressPenalty += (s.risk - 75) * 0.15;
-if (s.risk > 85) stressPenalty += (s.risk - 85) * 0.35;
-if (s.risk > 92) stressPenalty += (s.risk - 92) * 0.75;
+  // capacity amplification
+  if (s.capacity < 40) stressPenalty += (40 - s.capacity) * 0.2;
+  if (s.capacity < 30) stressPenalty += (30 - s.capacity) * 0.4;
 
-// capacity amplification
-if (s.capacity < 40) stressPenalty += (40 - s.capacity) * 0.20;
-if (s.capacity < 30) stressPenalty += (30 - s.capacity) * 0.40;
+  // combined systemic overload multiplier
+  if (s.risk > 85 && s.capacity < 35) {
+    stressPenalty *= 1.5;
+  }
 
-// combined systemic overload multiplier
-if (s.risk > 85 && s.capacity < 35) {
-  stressPenalty *= 1.5;
-}
+  // apply share penalty
+  if (stressPenalty > 0) {
+    s.share = clamp(70, s.share - stressPenalty, 130);
+  }
 
-// apply share penalty
-if (stressPenalty > 0) {
-  s.share = clamp(70, s.share - stressPenalty, 130);
-}
+  // ---- Immediate credibility hit when system is overstretched ----
+  if (s.risk > 85 && s.capacity < 35) {
+    const credHit = 4 + Math.round((s.risk - 85) * 0.3) + Math.round((35 - s.capacity) * 0.2);
+    s.cred = clamp(0, s.cred - credHit, 100);
+  }
 
-// ---- Immediate credibility hit when system is overstretched ----
-if (s.risk > 85 && s.capacity < 35) {
-  const credHit = 4 + Math.round((s.risk - 85) * 0.3) + Math.round((35 - s.capacity) * 0.2);
-  s.cred = clamp(0, s.cred - credHit, 100);
-}
-
-// synergy erosion under collapse
-if (s.risk > 85 && s.capacity < 35) {
-  const erosion = 0.05 + (s.risk - 85) * 0.002; // up to ~10%
-  s.synergy = clamp(0, s.synergy * (1 - erosion), s.synergyCeiling);
-}
+  // synergy erosion under collapse
+  if (s.risk > 85 && s.capacity < 35) {
+    const erosion = 0.05 + (s.risk - 85) * 0.002; // up to ~10%
+    s.synergy = clamp(0, s.synergy * (1 - erosion), s.synergyCeiling);
+  }
 
   // final clamp
   s.share = clamp(70, s.share, 130);
@@ -845,7 +870,9 @@ function DriverBar({
     <div className={`rounded-xl bg-slate-900/30 ring-1 ${c.ring} p-3`}>
       <div className="flex items-center justify-between">
         <div className="text-xs text-slate-200/80">{label}</div>
-        <span className={`px-2 py-0.5 rounded-full text-[11px] font-medium ${c.badge}`}>{t.toUpperCase()}</span>
+        <span className={`px-2 py-0.5 rounded-full text-[11px] font-medium ${c.badge}`}>
+          {t.toUpperCase()}
+        </span>
       </div>
 
       <div className="mt-2 flex items-center justify-between text-xs">
@@ -1013,11 +1040,13 @@ export default function Page() {
       },
       note:
         draft.note +
-        ` (Presentation grade ${grade}: ${graded.deltas.dShare >= 0 ? "+" : "−"}${Math.abs(graded.deltas.dShare).toFixed(
-          1
-        )} share, ${graded.deltas.dSynergy >= 0 ? "+" : "−"}${Math.abs(graded.deltas.dSynergy).toFixed(
-          1
-        )} synergy, ${graded.deltas.dAttr <= 0 ? "−" : "+"}${Math.abs(graded.deltas.dAttr).toFixed(2)}pp attrition)`,
+        ` (Board conviction: ${boardConvictionLabel(grade)} · ${
+          graded.deltas.dShare >= 0 ? "+" : "−"
+        }${Math.abs(graded.deltas.dShare).toFixed(1)} share, ${
+          graded.deltas.dSynergy >= 0 ? "+" : "−"
+        }${Math.abs(graded.deltas.dSynergy).toFixed(1)} synergy, ${
+          graded.deltas.dAttr <= 0 ? "−" : "+"
+        }${Math.abs(graded.deltas.dAttr).toFixed(2)}pp attrition)`,
     };
   }, [draft, grade]);
 
@@ -1038,7 +1067,9 @@ export default function Page() {
         <div className="flex items-start justify-between gap-4">
           <div>
             <div className="text-xs text-slate-300/70">PMI Deal Simulation</div>
-            <h1 className="mt-1 text-2xl sm:text-3xl font-semibold tracking-tight text-white">M&A Chapter - PMI Deal Simulation Training</h1>
+            <h1 className="mt-1 text-2xl sm:text-3xl font-semibold tracking-tight text-white">
+              M&A Chapter - PMI Deal Simulation Training
+            </h1>
             <p className="mt-2 max-w-2xl text-sm text-slate-200/75">
               Teams navigate five decision gates. Each choice shifts the trajectory across value delivery, people stability, and market perception.
             </p>
@@ -1124,7 +1155,10 @@ export default function Page() {
 
                 <div className="mt-5 grid grid-cols-1 md:grid-cols-2 gap-4">
                   {currentGate.options.map((o) => (
-                    <div key={o.id} className="rounded-2xl bg-slate-950/40 ring-1 ring-white/10 p-4 hover:ring-white/20 transition">
+                    <div
+                      key={o.id}
+                      className="rounded-2xl bg-slate-950/40 ring-1 ring-white/10 p-4 hover:ring-white/20 transition"
+                    >
                       <div className="flex items-start justify-between gap-3">
                         <div>
                           <div className="text-xs text-slate-300/70">Option {o.id}</div>
@@ -1136,10 +1170,18 @@ export default function Page() {
                       <p className="mt-2 text-sm text-slate-200/70">{o.blurb}</p>
 
                       <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-200/75">
-                        <div className="rounded-lg bg-slate-900/40 ring-1 ring-white/10 px-2 py-1">Cred {signed(o.dCred, 1)}</div>
-                        <div className="rounded-lg bg-slate-900/40 ring-1 ring-white/10 px-2 py-1">Risk {signed(o.dRisk, 1)}</div>
-                        <div className="rounded-lg bg-slate-900/40 ring-1 ring-white/10 px-2 py-1">Attr {signed(o.dAttrition, 1)}pp</div>
-                        <div className="rounded-lg bg-slate-900/40 ring-1 ring-white/10 px-2 py-1">Cap {signed(o.dCapacity, 1)}</div>
+                        <div className="rounded-lg bg-slate-900/40 ring-1 ring-white/10 px-2 py-1">
+                          Cred {signed(o.dCred, 1)}
+                        </div>
+                        <div className="rounded-lg bg-slate-900/40 ring-1 ring-white/10 px-2 py-1">
+                          Risk {signed(o.dRisk, 1)}
+                        </div>
+                        <div className="rounded-lg bg-slate-900/40 ring-1 ring-white/10 px-2 py-1">
+                          Attr {signed(o.dAttrition, 1)}pp
+                        </div>
+                        <div className="rounded-lg bg-slate-900/40 ring-1 ring-white/10 px-2 py-1">
+                          Cap {signed(o.dCapacity, 1)}
+                        </div>
                       </div>
 
                       {currentGate.id === "DG4" ? (
@@ -1175,7 +1217,8 @@ export default function Page() {
                 <div className="flex items-center justify-between">
                   <div className="text-xs text-slate-300/70">Impact</div>
                   <div className="text-xs text-slate-200/70 tabular-nums">
-                    Feasibility <span className="text-white">{effectiveDraft ? `${fmt1(effectiveDraft.feasibility * 100)}%` : "—"}</span>
+                    Feasibility{" "}
+                    <span className="text-white">{effectiveDraft ? `${fmt1(effectiveDraft.feasibility * 100)}%` : "—"}</span>
                   </div>
                 </div>
 
@@ -1218,7 +1261,9 @@ export default function Page() {
                           <span className="text-slate-200/75">Synergy ceiling</span>
                           <span className="tabular-nums text-white">
                             {fmt1(effectiveDraft.next.synergyCeiling)}%
-                            <span className={`ml-2 text-xs px-2 py-0.5 rounded-full ${badgeClass(effectiveDraft.deltas.synergyCeiling)}`}>
+                            <span
+                              className={`ml-2 text-xs px-2 py-0.5 rounded-full ${badgeClass(effectiveDraft.deltas.synergyCeiling)}`}
+                            >
                               {signed(effectiveDraft.deltas.synergyCeiling, 1)}
                             </span>
                           </span>
@@ -1231,9 +1276,9 @@ export default function Page() {
                       </div>
                     </div>
 
-                    {/* REQUIRED grade */}
+                    {/* REQUIRED board conviction */}
                     <div className="mt-4 rounded-2xl bg-slate-950/40 ring-1 ring-white/10 p-4">
-                      <div className="text-sm font-semibold text-white">Presentation grade (required)</div>
+                      <div className="text-sm font-semibold text-white">Board conviction (required)</div>
                       <div className="mt-2 flex items-center gap-3">
                         <select
                           value={grade ?? ""}
@@ -1241,14 +1286,14 @@ export default function Page() {
                           className="rounded-xl bg-slate-900/60 ring-1 ring-white/10 px-3 py-2 text-sm text-white"
                         >
                           <option value="" disabled>
-                            Select grade…
+                            Select conviction…
                           </option>
-                          <option value="1">1 — sehr gut</option>
-                          <option value="2">2 — gut</option>
-                          <option value="3">3 — befriedigend</option>
-                          <option value="4">4 — ausreichend</option>
-                          <option value="5">5 — mangelhaft</option>
-                          <option value="6">6 — schlecht</option>
+                          <option value="1">Board fully convinced</option>
+                          <option value="2">Board convinced</option>
+                          <option value="3">Board supportive</option>
+                          <option value="4">Board unconvinced</option>
+                          <option value="5">Board concerned</option>
+                          <option value="6">Board rejects</option>
                         </select>
 
                         <div className="text-xs text-slate-300/70">
@@ -1296,44 +1341,42 @@ export default function Page() {
                 Review the final outcome and discuss trade-offs. There is no “perfect” path — only decisions under constraints.
               </p>
 
-{/* PMI Robustness Index (0–100) */}
-{(() => {
-  const robustness = computeRobustnessIndex(state);
+              {/* PMI Robustness Index (0–100) */}
+              {(() => {
+                const robustness = computeRobustnessIndex(state);
 
-  const badge =
-    robustness >= 75
-      ? { label: "GREEN", cls: "bg-emerald-500/15 text-emerald-200 ring-1 ring-emerald-400/20" }
-      : robustness >= 55
-      ? { label: "YELLOW", cls: "bg-amber-500/15 text-amber-200 ring-1 ring-amber-400/20" }
-      : { label: "RED", cls: "bg-rose-500/15 text-rose-200 ring-1 ring-rose-400/20" };
+                const badge =
+                  robustness >= 75
+                    ? { label: "GREEN", cls: "bg-emerald-500/15 text-emerald-200 ring-1 ring-emerald-400/20" }
+                    : robustness >= 55
+                    ? { label: "YELLOW", cls: "bg-amber-500/15 text-amber-200 ring-1 ring-amber-400/20" }
+                    : { label: "RED", cls: "bg-rose-500/15 text-rose-200 ring-1 ring-rose-400/20" };
 
-  return (
-    <div className="mt-5 rounded-2xl bg-slate-950/40 ring-1 ring-white/10 p-5">
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <div className="text-xs text-slate-300/70">Overall</div>
-          <div className="text-lg font-semibold text-white">PMI Robustness Index</div>
-        </div>
-        <span className={`px-3 py-1 rounded-full text-xs font-semibold ${badge.cls}`}>
-          {badge.label}
-        </span>
-      </div>
+                return (
+                  <div className="mt-5 rounded-2xl bg-slate-950/40 ring-1 ring-white/10 p-5">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <div className="text-xs text-slate-300/70">Overall</div>
+                        <div className="text-lg font-semibold text-white">PMI Robustness Index</div>
+                      </div>
+                      <span className={`px-3 py-1 rounded-full text-xs font-semibold ${badge.cls}`}>{badge.label}</span>
+                    </div>
 
-      <div className="mt-3 flex items-end justify-between">
-        <div className="text-4xl font-semibold text-white">{robustness}</div>
-        <div className="text-xs text-slate-300/70">0–100 (higher is better)</div>
-      </div>
+                    <div className="mt-3 flex items-end justify-between">
+                      <div className="text-4xl font-semibold text-white">{robustness}</div>
+                      <div className="text-xs text-slate-300/70">0–100 (higher is better)</div>
+                    </div>
 
-      <div className="mt-3 h-2 w-full rounded-full bg-white/10 overflow-hidden">
-        <div className="h-full bg-white/60" style={{ width: `${robustness}%` }} />
-      </div>
+                    <div className="mt-3 h-2 w-full rounded-full bg-white/10 overflow-hidden">
+                      <div className="h-full bg-white/60" style={{ width: `${robustness}%` }} />
+                    </div>
 
-      <div className="mt-3 text-xs text-slate-300/70">
-        Benchmark of value delivery + sustainability under execution constraints.
-      </div>
-    </div>
-  );
-})()}
+                    <div className="mt-3 text-xs text-slate-300/70">
+                      Benchmark of value delivery + sustainability under execution constraints.
+                    </div>
+                  </div>
+                );
+              })()}
 
               <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div className="rounded-2xl bg-slate-900/40 ring-1 ring-white/10 p-4 shadow-lg">
@@ -1356,23 +1399,23 @@ export default function Page() {
                 </div>
               </div>
 
-              {/* Optional: show per-gate grades */}
+              {/* Board conviction by gate */}
               <div className="mt-6 rounded-2xl bg-slate-950/40 ring-1 ring-white/10 p-5">
-                <div className="text-sm font-semibold text-white">Grades by gate</div>
+                <div className="text-sm font-semibold text-white">Board conviction by gate</div>
                 <div className="mt-3 grid grid-cols-2 md:grid-cols-5 gap-2">
                   {gates.map((g, idx) => {
                     const h = history[idx];
-                    const gr = h?.grade ?? "—";
+                    const gr = h?.grade ? boardConvictionLabel(h.grade) : "—";
                     return (
                       <div key={g.id} className="rounded-xl bg-slate-900/40 ring-1 ring-white/10 p-3">
                         <div className="text-xs text-slate-300/70">{g.id}</div>
-                        <div className="mt-1 text-lg font-semibold text-white">{gr}</div>
+                        <div className="mt-1 text-sm font-semibold text-white">{gr}</div>
                       </div>
                     );
                   })}
                 </div>
                 <div className="mt-2 text-xs text-slate-300/70">
-                  Grade impacts: Share / Synergy / Attrition (slight but noticeable).
+                  Conviction impacts: Share / Synergy / Attrition (slight but noticeable).
                 </div>
               </div>
 
@@ -1381,7 +1424,7 @@ export default function Page() {
                 <ul className="mt-3 space-y-2 text-sm text-slate-200/75 list-disc pl-5">
                   <li>Which trade-off did you prioritize most — ambition, stability, or credibility?</li>
                   <li>Where did constraints (risk/capacity/ceiling) limit your ability to realize value?</li>
-                  <li>How did your presentation quality (grade) influence outcomes?</li>
+                  <li>How did your board conviction influence outcomes?</li>
                 </ul>
               </div>
 
@@ -1396,7 +1439,8 @@ export default function Page() {
         </div>
 
         <div className="mt-10 text-xs text-slate-400/70">
-          Local prototype · State persists in localStorage · Adjust parameters in <span className="text-slate-200">app/page.tsx</span>
+          Local prototype · State persists in localStorage · Adjust parameters in{" "}
+          <span className="text-slate-200">app/page.tsx</span>
         </div>
       </div>
     </div>
